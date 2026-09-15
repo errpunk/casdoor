@@ -35,6 +35,7 @@ interface SendCodeInputProps {
   /** set when the sign-in form renders its own inline captcha */
   captchaValue?: CaptchaValues;
   useInlineCaptcha?: boolean;
+  preloadCaptcha?: boolean;
   refreshCaptcha?: () => void;
   /** the signin/signup item can override the field placeholder and add its own class */
   placeholder?: string;
@@ -60,6 +61,7 @@ export function SendCodeInput({
   application,
   captchaValue,
   useInlineCaptcha,
+  preloadCaptcha = false,
   refreshCaptcha,
   placeholder,
   className,
@@ -191,6 +193,7 @@ export function SendCodeInput({
           owner={application.owner}
           name={application.name}
           visible={captchaVisible}
+          preload={preloadCaptcha}
           onOk={send}
           onCancel={() => setCaptchaVisible(false)}
         />

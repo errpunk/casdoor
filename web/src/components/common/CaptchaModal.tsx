@@ -19,6 +19,8 @@ interface CaptchaModalProps {
   isCurrentProvider?: boolean;
   /** render the captcha inline instead of inside a dialog */
   noModal?: boolean;
+  /** initialize an Aliyun popup before the user starts a captcha attempt */
+  preload?: boolean;
   onOk?: (captchaType: string, captchaToken: string, clientSecret: string) => void;
   onCancel?: () => void;
   /** inline mode: report every keystroke/token so the parent can submit it */
@@ -38,6 +40,7 @@ export function CaptchaModal({
   visible,
   isCurrentProvider = false,
   noModal = false,
+  preload = false,
   onOk,
   onCancel,
   onUpdateToken,
@@ -53,7 +56,10 @@ export function CaptchaModal({
   const [open, setOpen] = React.useState(false);
   const [captchaImg, setCaptchaImg] = React.useState("");
   const [captchaToken, setCaptchaToken] = React.useState("");
+  const [popupAttempt, setPopupAttempt] = React.useState(0);
   const defaultInputRef = React.useRef<HTMLInputElement>(null);
+  const popupPreloadedRef = React.useRef(false);
+  const wasVisibleRef = React.useRef(Boolean(visible));
 
   const handleOk = React.useCallback(
     (type = captchaType, token = captchaToken, secret = clientSecret) => {
@@ -95,6 +101,7 @@ export function CaptchaModal({
           setSubType(res.subType);
           setClientId2(res.clientId2);
           setClientSecret2(res.clientSecret2);
+          popupPreloadedRef.current = res.type === "Aliyun Captcha" && res.subType === "Popup";
         }
       });
     },
@@ -103,14 +110,32 @@ export function CaptchaModal({
   );
 
   React.useEffect(() => {
+    if (!preload || noModal) {
+      return;
+    }
+    popupPreloadedRef.current = false;
+    loadCaptcha();
+  }, [preload, noModal, loadCaptcha]);
+
+  React.useEffect(() => {
     if (visible || noModal) {
-      loadCaptcha();
+      if (!popupPreloadedRef.current) {
+        loadCaptcha();
+      }
     } else {
       setCaptchaToken("");
       setOpen(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, noModal]);
+
+  React.useEffect(() => {
+    if (preload && wasVisibleRef.current && !visible) {
+      // Alibaba requires a fresh initialization for the next verification.
+      setPopupAttempt((attempt) => attempt + 1);
+    }
+    wasVisibleRef.current = Boolean(visible);
+  }, [preload, visible]);
 
   // A widget-based captcha resolves on its own, so submit as soon as it does.
   React.useEffect(() => {
@@ -132,6 +157,8 @@ export function CaptchaModal({
       onUpdateToken?.(captchaType, token, clientSecret);
     }
   };
+
+  const isAliyunPopup = captchaType === "Aliyun Captcha" && subType === "Popup";
 
   const renderDefaultCaptcha = () =>
     noModal ? (
@@ -185,12 +212,14 @@ export function CaptchaModal({
     ) : (
       <div className="flex justify-center">
         <CaptchaWidget
+          key={isAliyunPopup ? popupAttempt : undefined}
           captchaType={captchaType}
           subType={subType}
           siteKey={clientId}
           clientSecret={clientSecret}
           clientId2={clientId2}
           clientSecret2={clientSecret2}
+          active={!isAliyunPopup || Boolean(visible)}
           onChange={onTokenChange}
           onCancel={handleCancel}
         />
@@ -202,13 +231,12 @@ export function CaptchaModal({
   }
 
   const okDisabled = captchaType === "Default" && !/^\d{5}$/.test(captchaToken);
-  const isAliyunPopup = captchaType === "Aliyun Captcha" && subType === "Popup";
 
   return (
     <>
       {/* the popup positions itself against the viewport, so it only needs an
           anchor that takes no space in the caller's layout */}
-      {visible && isAliyunPopup ? <div className="absolute h-0 w-0">{renderCaptcha()}</div> : null}
+      {(visible || preload) && isAliyunPopup ? <div className="absolute h-0 w-0">{renderCaptcha()}</div> : null}
       <Dialog
         open={open}
         onOpenChange={(next) => {

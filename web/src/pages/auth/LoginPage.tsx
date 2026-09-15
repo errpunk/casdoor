@@ -1067,6 +1067,7 @@ export default function LoginPage({type = "login", application: applicationProp,
         application={application}
         applicationId={Setting.getApplicationName(application)}
         useInlineCaptcha={Setting.isInlineCaptchaEnabled(application)}
+        preloadCaptcha={captchaProvider?.type === "Aliyun Captcha" && captchaProvider.subType === "Popup"}
         captchaValue={captchaValues}
         refreshCaptcha={refreshInlineCaptcha}
       />
@@ -1411,6 +1412,8 @@ export default function LoginPage({type = "login", application: applicationProp,
             owner={captchaProvider.owner}
             name={captchaProvider.name}
             visible={captchaVisible}
+            preload={captchaProvider.type === "Aliyun Captcha" && captchaProvider.subType === "Popup" &&
+              (loginMethod === "password" || loginMethod === "ldap")}
             isCurrentProvider
             innerRef={captchaRef}
             onOk={(captchaType, captchaToken, clientSecret) => {

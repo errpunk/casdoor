@@ -7,18 +7,66 @@ interface CaptchaWidgetProps {
   clientSecret?: string;
   clientId2?: string;
   clientSecret2?: string;
+  /** popup widgets initialize while idle and start when their caller becomes active */
+  active?: boolean;
   onChange: (token: string) => void;
   /** a vendor overlay was closed or errored without producing a token */
   onCancel?: () => void;
 }
 
 const aliyunPopupButtonId = "aliyun-captcha-button";
+const aliyunCaptchaScriptSrc = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+const aliyunCaptchaWarmupMs = 2000;
+
+let aliyunCaptchaScriptPromise: Promise<void> | undefined;
 
 function loadScript(src: string) {
   const tag = document.createElement("script");
   tag.async = false;
   tag.src = src;
   document.getElementsByTagName("body")[0].appendChild(tag);
+}
+
+/**
+ * Loads Alibaba Cloud's collector as early as the caller can provide the
+ * provider prefix. The vendor recommends leaving time between loading this
+ * script and starting verification so it can collect useful environment and
+ * device signals. CaptchaWidget also initializes the popup while it is idle;
+ * the caller activates that prepared instance when verification is requested.
+ */
+export function preloadAliyunCaptcha(prefix?: string): Promise<void> {
+  if (!prefix || prefix === "***") {
+    return Promise.resolve();
+  }
+
+  (window as any).AliyunCaptchaConfig = {region: "cn", prefix};
+  if (typeof (window as any).initAliyunCaptcha === "function") {
+    return Promise.resolve();
+  }
+  if (aliyunCaptchaScriptPromise) {
+    return aliyunCaptchaScriptPromise;
+  }
+
+  const loadPromise = new Promise<void>((resolve, reject) => {
+    const tag = document.createElement("script");
+    tag.async = true;
+    tag.src = aliyunCaptchaScriptSrc;
+    tag.onload = () => {
+      if (typeof (window as any).initAliyunCaptcha === "function") {
+        resolve();
+      } else {
+        reject(new Error("Aliyun Captcha loaded without initAliyunCaptcha"));
+      }
+    };
+    tag.onerror = () => reject(new Error("Failed to load Aliyun Captcha"));
+    document.getElementsByTagName("body")[0].appendChild(tag);
+  });
+
+  aliyunCaptchaScriptPromise = loadPromise.catch((error) => {
+    aliyunCaptchaScriptPromise = undefined;
+    throw error;
+  });
+  return aliyunCaptchaScriptPromise;
 }
 
 /**
@@ -34,6 +82,7 @@ export function CaptchaWidget({
   clientSecret,
   clientId2,
   clientSecret2,
+  active = true,
   onChange,
   onCancel,
 }: CaptchaWidgetProps) {
@@ -41,11 +90,15 @@ export function CaptchaWidget({
   onChangeRef.current = onChange;
   const onCancelRef = React.useRef(onCancel);
   onCancelRef.current = onCancel;
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
+  const startPopupRef = React.useRef<(() => void) | undefined>(undefined);
 
   React.useEffect(() => {
     const emit = (token: string) => onChangeRef.current(token);
     let timer: number | undefined;
     let clickTimer: number | undefined;
+    let popupStartTimer: number | undefined;
     let unmounted = false;
     let destroyCaptcha: (() => void) | undefined;
 
@@ -111,14 +164,10 @@ export function CaptchaWidget({
       break;
     }
     case "Aliyun Captcha": {
-      (window as any).AliyunCaptchaConfig = {region: "cn", prefix: clientSecret2};
       const isPopup = subType === "Popup";
-      timer = window.setInterval(() => {
-        if (!(window as any).initAliyunCaptcha) {
-          loadScript("https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js");
-        }
-        if ((window as any).initAliyunCaptcha) {
-          if (clientSecret2 && clientSecret2 !== "***") {
+      preloadAliyunCaptcha(clientSecret2)
+        .then(() => {
+          if (!unmounted && clientSecret2 && clientSecret2 !== "***") {
             const options: Record<string, any> = {
               SceneId: clientId2,
               mode: isPopup ? "popup" : "embed",
@@ -128,14 +177,37 @@ export function CaptchaWidget({
             };
 
             if (isPopup) {
+              const initializedAt = Date.now();
               let settled = false;
               let instanceReady = false;
+              let verificationStarted = false;
+              let captchaInstance: any;
               const settle = (done: () => void) => {
                 if (!settled) {
                   settled = true;
                   done();
                 }
               };
+              const startPopup = () => {
+                if (!activeRef.current || verificationStarted || !captchaInstance) {
+                  return;
+                }
+                verificationStarted = true;
+                const warmupRemaining = Math.max(0, initializedAt + aliyunCaptchaWarmupMs - Date.now());
+                popupStartTimer = window.setTimeout(() => {
+                  if (unmounted || !activeRef.current) {
+                    verificationStarted = false;
+                    return;
+                  }
+                  if (typeof captchaInstance.startTracelessVerification === "function") {
+                    captchaInstance.startTracelessVerification();
+                  } else {
+                    // non-traceless scenes only open from a click on `button`
+                    clickTimer = window.setTimeout(() => document.getElementById(aliyunPopupButtonId)?.click(), 0);
+                  }
+                }, warmupRemaining);
+              };
+              startPopupRef.current = startPopup;
 
               options.button = `#${aliyunPopupButtonId}`;
               options.success = (data: any) => settle(() => emit(data.toString()));
@@ -145,22 +217,18 @@ export function CaptchaWidget({
               // the caller has to be released or its flow hangs forever
               options.onClose = () => settle(() => onCancelRef.current?.());
               options.onError = () => settle(() => onCancelRef.current?.());
-              options.getInstance = (instance: any) => {
-                if (!instance || instanceReady) {
+              options.getInstance = (nextInstance: any) => {
+                if (!nextInstance || instanceReady) {
                   return;
                 }
                 if (unmounted) {
-                  instance.destroyCaptcha?.();
+                  nextInstance.destroyCaptcha?.();
                   return;
                 }
                 instanceReady = true;
-                destroyCaptcha = () => instance.destroyCaptcha?.();
-                if (typeof instance.startTracelessVerification === "function") {
-                  instance.startTracelessVerification();
-                } else {
-                  // non-traceless scenes only open from a click on `button`
-                  clickTimer = window.setTimeout(() => document.getElementById(aliyunPopupButtonId)?.click(), 0);
-                }
+                captchaInstance = nextInstance;
+                destroyCaptcha = () => captchaInstance.destroyCaptcha?.();
+                startPopup();
               };
             } else {
               options.captchaVerifyCallback = (data: any) => emit(data.toString());
@@ -169,9 +237,12 @@ export function CaptchaWidget({
 
             (window as any).initAliyunCaptcha(options);
           }
-          window.clearInterval(timer);
-        }
-      }, 300);
+        })
+        .catch(() => {
+          if (!unmounted) {
+            onCancelRef.current?.();
+          }
+        });
       break;
     }
     case "GEETEST": {
@@ -216,15 +287,25 @@ export function CaptchaWidget({
 
     return () => {
       unmounted = true;
+      startPopupRef.current = undefined;
       if (timer !== undefined) {
         window.clearInterval(timer);
       }
       if (clickTimer !== undefined) {
         window.clearTimeout(clickTimer);
       }
+      if (popupStartTimer !== undefined) {
+        window.clearTimeout(popupStartTimer);
+      }
       destroyCaptcha?.();
     };
   }, [captchaType, subType, siteKey, clientSecret, clientId2, clientSecret2]);
+
+  React.useEffect(() => {
+    if (active) {
+      startPopupRef.current?.();
+    }
+  }, [active]);
 
   return (
     <React.Fragment>
